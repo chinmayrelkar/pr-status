@@ -1,6 +1,6 @@
 #!/bin/bash
 # PR Status Checker - Check GitHub PR status
-# Usage: 
+# Usage:
 #   pr-status                          (show all PRs in current repo)
 #   pr-status <pr_number>              (must be in a git repo)
 #   pr-status <owner/repo>             (show all PRs in repo)
@@ -35,127 +35,136 @@ print_status() {
 check_single_pr() {
   local pr_number=$1
   local repo=$2
-  local temp_file=$3
-  
+  local temp_dir=$3
+
   # Build command - if repo is provided, use it; otherwise rely on current repo
   local pr_cmd="gh pr view $pr_number"
   if [ -n "$repo" ]; then
     pr_cmd="$pr_cmd --repo $repo"
   fi
-  
+
   # Get PR details
   local title
   local url
   local base_branch
   local head_branch
-  
-  title=$($pr_cmd --json title -q '.title' 2>/dev/null) || {
+
+  title=$($pr_cmd --json title --jq '.title' 2>/dev/null) || {
     {
       if [ -n "$repo" ]; then
         echo -e "${RED}Error: PR #$pr_number not found in $repo${NC}"
       else
         echo -e "${RED}Error: Could not fetch PR #$pr_number${NC}"
       fi
-    } >> "$temp_file"
+    } > "$temp_dir/pr_$pr_number"
     return 1
   }
-  
-  url=$($pr_cmd --json url -q '.url' 2>/dev/null)
-  base_branch=$($pr_cmd --json baseRefName -q '.baseRefName' 2>/dev/null)
-  head_branch=$($pr_cmd --json headRefName -q '.headRefName' 2>/dev/null)
-  
-  # Build output
-  local output=""
-  output+=$(printf "${BLUE}PR #$pr_number:${NC} $title\n")
-  if [ -n "$url" ]; then
-    output+=$(printf "${BLUE}Link:${NC} $url\n")
-  fi
-  
-  if [ -n "$base_branch" ] && [ -n "$head_branch" ]; then
-    output+=$(printf "${CYAN}Branches:${NC} $head_branch → $base_branch\n")
-  fi
-  output+=$(printf "\n")
-  
-  # Build status check command
-  local status_cmd="gh pr view $pr_number"
+
+  url=$($pr_cmd --json url --jq '.url' 2>/dev/null)
+  base_branch=$($pr_cmd --json baseRefName --jq '.baseRefName' 2>/dev/null)
+  head_branch=$($pr_cmd --json headRefName --jq '.headRefName' 2>/dev/null)
+
+  # Build output in temp file for this PR
+  {
+    printf "%b\n" "${BLUE}PR #$pr_number:${NC} $title"
+    if [ -n "$url" ]; then
+      printf "%b\n" "${BLUE}Link:${NC} $url"
+    fi
+
+    if [ -n "$base_branch" ] && [ -n "$head_branch" ]; then
+      printf "%b\n" "${CYAN}Branches:${NC} $head_branch → $base_branch"
+    fi
+    printf "\n"
+
+    # Build status check command
+    local status_cmd="gh pr view $pr_number"
+    if [ -n "$repo" ]; then
+      status_cmd="$status_cmd --repo $repo"
+    fi
+
+    # Get status checks
+    local has_checks=false
+    while IFS='|' read -r context state; do
+      has_checks=true
+      print_status "$state"
+      printf " - %s\n" "$context"
+    done < <($status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | "\(.context)|\(.state)"' 2>/dev/null)
+
+    # Summary
+    printf "\n"
+    if ! $status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | select(.state=="PENDING" or .state=="FAILURE")' 2>/dev/null | grep -q .; then
+      printf "%b\n" "${GREEN}✅ All checks passed!${NC}"
+    elif $status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | select(.state=="PENDING")' 2>/dev/null | grep -q .; then
+      printf "%b\n" "${YELLOW}⏳ Some checks are still pending${NC}"
+    elif $status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | select(.state=="FAILURE")' 2>/dev/null | grep -q .; then
+      printf "%b\n" "${RED}❌ Some checks failed${NC}"
+    fi
+
+    # Display reviews
+    local reviews
+    reviews=$($status_cmd --json reviews --jq '.reviews[] | "\(.author.login)|\(.state)"' 2>/dev/null)
+
+    if [ -n "$reviews" ]; then
+      printf "\n%b\n" "${BLUE}Reviews:${NC}"
+      while IFS='|' read -r author state; do
+        printf "  - %s: %s\n" "$author" "$state"
+      done <<< "$reviews"
+    fi
+
+    printf "\n"
+  } > "$temp_dir/pr_$pr_number"
+}
+
+get_prs_in_repo() {
+  local repo=$1
+  local pr_cmd
+
   if [ -n "$repo" ]; then
-    status_cmd="$status_cmd --repo $repo"
+    gh pr list --author @me --state open --json number --jq '.[].number' --repo "$repo" 2>/dev/null
+  else
+    gh pr list --author @me --state open --json number --jq '.[].number' 2>/dev/null
   fi
-  
-  # Get status checks
-  while IFS='|' read -r context state; do
-    output+=$(print_status "$state")
-    output+=$(printf " - $context\n")
-  done < <($status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | "\(.context)|\(.state)"' 2>/dev/null)
-  
-  # Summary
-  output+=$(printf "\n")
-  if ! $status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | select(.state=="PENDING" or .state=="FAILURE")' 2>/dev/null | grep -q .; then
-    output+=$(printf "${GREEN}✅ All checks passed!${NC}\n")
-  elif $status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | select(.state=="PENDING")' 2>/dev/null | grep -q .; then
-    output+=$(printf "${YELLOW}⏳ Some checks are still pending${NC}\n")
-  elif $status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | select(.state=="FAILURE")' 2>/dev/null | grep -q .; then
-    output+=$(printf "${RED}❌ Some checks failed${NC}\n")
-  fi
-  
-  # Display reviews
-  local reviews
-  reviews=$($status_cmd --json reviews -q '.reviews[] | "\(.author.login)|\(.state)"' 2>/dev/null)
-  
-  if [ -n "$reviews" ]; then
-    output+=$(printf "\n${BLUE}Reviews:${NC}\n")
-    while IFS='|' read -r author state; do
-      output+=$(printf "  - $author: $state\n")
-    done <<< "$reviews"
-  fi
-  
-  output+=$(printf "\n")
-  
-  # Write to temp file
-  echo -e "$output" >> "$temp_file"
 }
 
 check_all_prs_in_repo() {
   local repo=$1
-  
+
   if [ -n "$repo" ]; then
     echo -e "${BLUE}Fetching all open PRs in $repo...${NC}\n"
   else
     echo -e "${BLUE}Fetching all open PRs for current user in this repo...${NC}\n"
   fi
-  
+
   local prs
-  local pr_cmd="gh pr list --author @me --state open -q '.[].number'"
-  
-  if [ -n "$repo" ]; then
-    pr_cmd="$pr_cmd --repo $repo"
-  fi
-  
-  prs=$($pr_cmd 2>/dev/null) || {
+  prs=$(get_prs_in_repo "$repo") || {
     echo -e "${RED}Error: Could not fetch PRs${NC}"
     return 1
   }
-  
+
   if [ -z "$prs" ]; then
     echo -e "${YELLOW}No open PRs found${NC}"
     return 0
   fi
-  
-  # Create temp file for collecting output
-  local temp_file
-  temp_file=$(mktemp)
-  
+
+  # Create temp directory for collecting output
+  local temp_dir
+  temp_dir=$(mktemp -d)
+
   # Process PRs in parallel
   while read -r pr_number; do
-    check_single_pr "$pr_number" "$repo" "$temp_file" &
+    check_single_pr "$pr_number" "$repo" "$temp_dir" &
   done <<< "$prs"
-  
+
   # Wait for all background jobs
   wait
-  
-  # Print collected output
-  cat "$temp_file"
-  rm "$temp_file"
+
+  # Print collected output in order
+  while read -r pr_number; do
+    cat "$temp_dir/pr_$pr_number"
+  done <<< "$prs"
+
+  # Cleanup
+  rm -rf "$temp_dir"
 }
 
 # Check if we're in a git repository
@@ -185,9 +194,13 @@ case $# in
   0)
     # Scenario 0: no args
     if is_in_git_repo; then
-      local current_repo
       current_repo=$(get_current_repo)
-      check_all_prs_in_repo "$current_repo"
+      if [ $? -eq 0 ] && [ -n "$current_repo" ]; then
+        check_all_prs_in_repo "$current_repo"
+      else
+        echo -e "${RED}Error: Could not determine current repository${NC}"
+        exit 1
+      fi
     else
       echo -e "${RED}Error: Not in a git repository${NC}"
       echo -e "${YELLOW}Usage:${NC}"
@@ -208,7 +221,10 @@ case $# in
       if is_in_git_repo; then
         # Scenario 3: CD exists, no REPO, PR specified
         echo -e "${BLUE}Fetching PR #$1 status...${NC}\n"
-        check_single_pr "$1" "" "/dev/stdout"
+        temp_dir=$(mktemp -d)
+        check_single_pr "$1" "" "$temp_dir"
+        cat "$temp_dir/pr_$1"
+        rm -rf "$temp_dir"
       else
         # Scenario 1: no CD, no REPO, but PR - raise error
         echo -e "${RED}Error: Cannot find PR #$1 without repository context${NC}"
@@ -224,7 +240,10 @@ case $# in
   2)
     # Scenario 4: REPO and PR specified
     echo -e "${BLUE}Fetching PR #$2 status...${NC}\n"
-    check_single_pr "$2" "$1" "/dev/stdout"
+    temp_dir=$(mktemp -d)
+    check_single_pr "$2" "$1" "$temp_dir"
+    cat "$temp_dir/pr_$2"
+    rm -rf "$temp_dir"
     ;;
   *)
     echo -e "${RED}Error: Invalid arguments${NC}"
