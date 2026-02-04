@@ -12,24 +12,47 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[0;37m'
+BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m' # No Color
 
 print_status() {
   local status=$1
   case $status in
     SUCCESS)
-      echo -ne "${GREEN}✅ SUCCESS${NC}"
+      printf "%b✅ SUCCESS%b" "${GREEN}" "${NC}"
       ;;
     FAILURE)
-      echo -ne "${RED}❌ FAILURE${NC}"
+      printf "%b❌ FAILURE%b" "${RED}" "${NC}"
       ;;
     PENDING)
-      echo -ne "${YELLOW}⏳ PENDING${NC}"
+      printf "%b⏳ PENDING%b" "${YELLOW}" "${NC}"
       ;;
     *)
-      echo -ne "${BLUE}❓ $status${NC}"
+      printf "%b❓ %s%b" "${BLUE}" "$status" "${NC}"
       ;;
   esac
+}
+
+print_separator() {
+  local width=80
+  printf "%b" "${DIM}"
+  printf "─%.0s" $(seq 1 $width)
+  printf "%b\n" "${NC}"
+}
+
+print_header_line() {
+  local text="$1"
+  local width=80
+  printf "%b┌" "${DIM}"
+  printf "─%.0s" $(seq 1 $((width - 2)))
+  printf "┐%b\n" "${NC}"
+  printf "%b│ %b%-$((width - 4))s %b│%b\n" "${DIM}" "${BOLD}${CYAN}" "$text" "${DIM}" "${NC}"
+  printf "%b└" "${DIM}"
+  printf "─%.0s" $(seq 1 $((width - 2)))
+  printf "┘%b\n" "${NC}"
 }
 
 check_single_pr() {
@@ -52,9 +75,9 @@ check_single_pr() {
   title=$($pr_cmd --json title --jq '.title' 2>/dev/null) || {
     {
       if [ -n "$repo" ]; then
-        echo -e "${RED}Error: PR #$pr_number not found in $repo${NC}"
+        printf "%b✗ Error:%b PR #$pr_number not found in $repo\n" "${RED}" "${NC}"
       else
-        echo -e "${RED}Error: Could not fetch PR #$pr_number${NC}"
+        printf "%b✗ Error:%b Could not fetch PR #$pr_number\n" "${RED}" "${NC}"
       fi
     } > "$temp_dir/pr_$pr_number"
     return 1
@@ -66,16 +89,25 @@ check_single_pr() {
 
   # Build output in temp file for this PR
   {
-    printf "%b\n" "${BLUE}PR #$pr_number:${NC} $title"
-    if [ -n "$url" ]; then
-      printf "%b\n" "${BLUE}Link:${NC} $url"
-    fi
-
-    if [ -n "$base_branch" ] && [ -n "$head_branch" ]; then
-      printf "%b\n" "${CYAN}Branches:${NC} $head_branch → $base_branch"
-    fi
+    # Header
     printf "\n"
+    printf "%b┌─ %bPR #%s%b %s\n" "${DIM}" "${MAGENTA}${BOLD}" "$pr_number" "${NC}" "$title"
+    
+    # Link
+    if [ -n "$url" ]; then
+      printf "%b│  %b🔗 Link:%b\n" "${DIM}" "${BLUE}" "${NC}"
+      printf "%b│     %s\n" "${DIM}" "$url"
+    fi
 
+    # Branches
+    if [ -n "$base_branch" ] && [ -n "$head_branch" ]; then
+      printf "%b│  %b⎇ Branches:%b\n" "${DIM}" "${CYAN}" "${NC}"
+      printf "%b│     %b%s%b → %b%s%b\n" "${DIM}" "${YELLOW}" "$head_branch" "${NC}" "${YELLOW}" "$base_branch" "${NC}"
+    fi
+
+    # Status checks
+    printf "%b│  %b◆ Checks:%b\n" "${DIM}" "${BLUE}" "${NC}"
+    
     # Build status check command
     local status_cmd="gh pr view $pr_number"
     if [ -n "$repo" ]; then
@@ -84,20 +116,28 @@ check_single_pr() {
 
     # Get status checks
     local has_checks=false
-    while IFS='|' read -r context state; do
+    local check_output
+    check_output=$($status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | "\(.context)|\(.state)"' 2>/dev/null)
+    
+    if [ -n "$check_output" ]; then
       has_checks=true
-      print_status "$state"
-      printf " - %s\n" "$context"
-    done < <($status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | "\(.context)|\(.state)"' 2>/dev/null)
+      while IFS='|' read -r context state; do
+        printf "%b│     " "${DIM}"
+        print_status "$state"
+        printf " %s\n" "$context"
+      done <<< "$check_output"
+    fi
 
     # Summary
-    printf "\n"
+    printf "%b│  %b♦ Status:%b " "${DIM}" "${BLUE}" "${NC}"
     if ! $status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | select(.state=="PENDING" or .state=="FAILURE")' 2>/dev/null | grep -q .; then
-      printf "%b\n" "${GREEN}✅ All checks passed!${NC}"
+      printf "%b✓ All checks passed!%b\n" "${GREEN}${BOLD}" "${NC}"
     elif $status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | select(.state=="PENDING")' 2>/dev/null | grep -q .; then
-      printf "%b\n" "${YELLOW}⏳ Some checks are still pending${NC}"
+      printf "%b⏳ Some checks are still pending%b\n" "${YELLOW}${BOLD}" "${NC}"
     elif $status_cmd --json statusCheckRollup --jq '.statusCheckRollup[] | select(.state=="FAILURE")' 2>/dev/null | grep -q .; then
-      printf "%b\n" "${RED}❌ Some checks failed${NC}"
+      printf "%b✗ Some checks failed%b\n" "${RED}${BOLD}" "${NC}"
+    else
+      printf "%b? No checks found%b\n" "${DIM}" "${NC}"
     fi
 
     # Display reviews
@@ -105,13 +145,34 @@ check_single_pr() {
     reviews=$($status_cmd --json reviews --jq '.reviews[] | "\(.author.login)|\(.state)"' 2>/dev/null)
 
     if [ -n "$reviews" ]; then
-      printf "\n%b\n" "${BLUE}Reviews:${NC}"
+      printf "%b│  %b👥 Reviews:%b\n" "${DIM}" "${BLUE}" "${NC}"
       while IFS='|' read -r author state; do
-        printf "  - %s: %s\n" "$author" "$state"
+        local review_icon
+        case $state in
+          APPROVED)
+            review_icon="✓"
+            printf "%b│     %b%s%b %s (%s)\n" "${DIM}" "${GREEN}" "$review_icon" "${NC}" "$author" "$state"
+            ;;
+          COMMENTED)
+            review_icon="💬"
+            printf "%b│     %b%s%b %s (%s)\n" "${DIM}" "${BLUE}" "$review_icon" "${NC}" "$author" "$state"
+            ;;
+          CHANGES_REQUESTED)
+            review_icon="✗"
+            printf "%b│     %b%s%b %s (%s)\n" "${DIM}" "${RED}" "$review_icon" "${NC}" "$author" "$state"
+            ;;
+          DISMISSED)
+            review_icon="○"
+            printf "%b│     %b%s%b %s (%s)\n" "${DIM}" "${DIM}" "$review_icon" "${NC}" "$author" "$state"
+            ;;
+          *)
+            printf "%b│     ? %s (%s)\n" "${DIM}" "$author" "$state"
+            ;;
+        esac
       done <<< "$reviews"
     fi
 
-    printf "\n"
+    printf "%b└─ %s\n" "${DIM}" "$(date +'%Y-%m-%d %H:%M:%S' 2>/dev/null || echo 'Just now')"
   } > "$temp_dir/pr_$pr_number"
 }
 
@@ -129,20 +190,25 @@ get_prs_in_repo() {
 check_all_prs_in_repo() {
   local repo=$1
 
+  # Print header
+  print_header_line "📊 PR Status Report"
+  printf "\n"
+  
   if [ -n "$repo" ]; then
-    echo -e "${BLUE}Fetching all open PRs in $repo...${NC}\n"
+    printf "%b Repository:%b $repo\n" "${BLUE}${BOLD}" "${NC}"
   else
-    echo -e "${BLUE}Fetching all open PRs for current user in this repo...${NC}\n"
+    printf "%b Repository:%b Current\n" "${BLUE}${BOLD}" "${NC}"
   fi
+  printf "%b Fetching status...%b\n\n" "${YELLOW}" "${NC}"
 
   local prs
   prs=$(get_prs_in_repo "$repo") || {
-    echo -e "${RED}Error: Could not fetch PRs${NC}"
+    printf "%b✗ Error:%b Could not fetch PRs\n" "${RED}${BOLD}" "${NC}"
     return 1
   }
 
   if [ -z "$prs" ]; then
-    echo -e "${YELLOW}No open PRs found${NC}"
+    printf "%b✓ No open PRs found%b\n" "${GREEN}${BOLD}" "${NC}"
     return 0
   fi
 
@@ -162,6 +228,12 @@ check_all_prs_in_repo() {
   while read -r pr_number; do
     cat "$temp_dir/pr_$pr_number"
   done <<< "$prs"
+
+  # Print footer
+  printf "\n"
+  print_separator
+  printf "%b Generated at: %s%b\n" "${DIM}" "$(date +'%Y-%m-%d %H:%M:%S')" "${NC}"
+  printf "\n"
 
   # Cleanup
   rm -rf "$temp_dir"
@@ -198,16 +270,16 @@ case $# in
       if [ $? -eq 0 ] && [ -n "$current_repo" ]; then
         check_all_prs_in_repo "$current_repo"
       else
-        echo -e "${RED}Error: Could not determine current repository${NC}"
+        printf "%b✗ Error:%b Could not determine current repository\n" "${RED}${BOLD}" "${NC}"
         exit 1
       fi
     else
-      echo -e "${RED}Error: Not in a git repository${NC}"
-      echo -e "${YELLOW}Usage:${NC}"
-      echo -e "  ${BLUE}pr-status${NC}                              (all PRs in current repo)"
-      echo -e "  ${BLUE}pr-status <owner/repo>${NC}                 (all PRs in repo)"
-      echo -e "  ${BLUE}pr-status <pr_number>${NC}                  (must be in a git repo)"
-      echo -e "  ${BLUE}pr-status <owner/repo> <pr_number>${NC}     (specific PR in repo)\n"
+      printf "%b✗ Error:%b Not in a git repository\n" "${RED}${BOLD}" "${NC}"
+      printf "\n%bUsage:%b\n" "${BLUE}${BOLD}" "${NC}"
+      printf "  %bpr-status%b                              (all PRs in current repo)\n" "${CYAN}" "${NC}"
+      printf "  %bpr-status <owner/repo>%b                 (all PRs in repo)\n" "${CYAN}" "${NC}"
+      printf "  %bpr-status <pr_number>%b                  (must be in a git repo)\n" "${CYAN}" "${NC}"
+      printf "  %bpr-status <owner/repo> <pr_number>%b     (specific PR in repo)\n\n" "${CYAN}" "${NC}"
       exit 1
     fi
     ;;
@@ -220,38 +292,46 @@ case $# in
       # Could be PR number
       if is_in_git_repo; then
         # Scenario 3: CD exists, no REPO, PR specified
-        echo -e "${BLUE}Fetching PR #$1 status...${NC}\n"
+        print_header_line "📊 PR Details"
+        printf "\n"
         temp_dir=$(mktemp -d)
         check_single_pr "$1" "" "$temp_dir"
         cat "$temp_dir/pr_$1"
+        printf "\n"
+        print_separator
+        printf "\n"
         rm -rf "$temp_dir"
       else
         # Scenario 1: no CD, no REPO, but PR - raise error
-        echo -e "${RED}Error: Cannot find PR #$1 without repository context${NC}"
-        echo -e "${YELLOW}Usage:${NC}"
-        echo -e "  ${BLUE}pr-status${NC}                              (all PRs in current repo)"
-        echo -e "  ${BLUE}pr-status <owner/repo>${NC}                 (all PRs in repo)"
-        echo -e "  ${BLUE}pr-status <pr_number>${NC}                  (must be in a git repo)"
-        echo -e "  ${BLUE}pr-status <owner/repo> <pr_number>${NC}     (specific PR in repo)\n"
+        printf "%b✗ Error:%b Cannot find PR #$1 without repository context\n" "${RED}${BOLD}" "${NC}"
+        printf "\n%bUsage:%b\n" "${BLUE}${BOLD}" "${NC}"
+        printf "  %bpr-status%b                              (all PRs in current repo)\n" "${CYAN}" "${NC}"
+        printf "  %bpr-status <owner/repo>%b                 (all PRs in repo)\n" "${CYAN}" "${NC}"
+        printf "  %bpr-status <pr_number>%b                  (must be in a git repo)\n" "${CYAN}" "${NC}"
+        printf "  %bpr-status <owner/repo> <pr_number>%b     (specific PR in repo)\n\n" "${CYAN}" "${NC}"
         exit 1
       fi
     fi
     ;;
   2)
     # Scenario 4: REPO and PR specified
-    echo -e "${BLUE}Fetching PR #$2 status...${NC}\n"
+    print_header_line "📊 PR Details"
+    printf "\n"
     temp_dir=$(mktemp -d)
     check_single_pr "$2" "$1" "$temp_dir"
     cat "$temp_dir/pr_$2"
+    printf "\n"
+    print_separator
+    printf "\n"
     rm -rf "$temp_dir"
     ;;
   *)
-    echo -e "${RED}Error: Invalid arguments${NC}"
-    echo -e "${YELLOW}Usage:${NC}"
-    echo -e "  ${BLUE}pr-status${NC}                              (all PRs in current repo)"
-    echo -e "  ${BLUE}pr-status <owner/repo>${NC}                 (all PRs in repo)"
-    echo -e "  ${BLUE}pr-status <pr_number>${NC}                  (must be in a git repo)"
-    echo -e "  ${BLUE}pr-status <owner/repo> <pr_number>${NC}     (specific PR in repo)\n"
+    printf "%b✗ Error:%b Invalid arguments\n" "${RED}${BOLD}" "${NC}"
+    printf "\n%bUsage:%b\n" "${BLUE}${BOLD}" "${NC}"
+    printf "  %bpr-status%b                              (all PRs in current repo)\n" "${CYAN}" "${NC}"
+    printf "  %bpr-status <owner/repo>%b                 (all PRs in repo)\n" "${CYAN}" "${NC}"
+    printf "  %bpr-status <pr_number>%b                  (must be in a git repo)\n" "${CYAN}" "${NC}"
+    printf "  %bpr-status <owner/repo> <pr_number>%b     (specific PR in repo)\n\n" "${CYAN}" "${NC}"
     exit 1
     ;;
 esac
