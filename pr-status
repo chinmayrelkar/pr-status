@@ -1,0 +1,215 @@
+#!/bin/bash
+# PR Status Checker - Check GitHub PR status
+# Usage: 
+#   pr-status                          (show all PRs across all repos)
+#   pr-status <pr_number>              (must be in a git repo OR specify repo)
+#   pr-status <owner/repo>             (show all PRs in repo)
+#   pr-status <owner/repo> <pr_number> (show specific PR in repo)
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+print_status() {
+  local status=$1
+  case $status in
+    SUCCESS)
+      echo -ne "${GREEN}✅ SUCCESS${NC}"
+      ;;
+    FAILURE)
+      echo -ne "${RED}❌ FAILURE${NC}"
+      ;;
+    PENDING)
+      echo -ne "${YELLOW}⏳ PENDING${NC}"
+      ;;
+    *)
+      echo -ne "${BLUE}❓ $status${NC}"
+      ;;
+  esac
+}
+
+check_single_pr() {
+  local pr_number=$1
+  local repo=$2
+  
+  echo -e "${BLUE}Fetching PR #$pr_number status...${NC}\n"
+  
+  # Build command - if repo is provided, use it; otherwise rely on current repo
+  local pr_cmd="gh pr view $pr_number"
+  if [ -n "$repo" ]; then
+    pr_cmd="$pr_cmd --repo $repo"
+  fi
+  
+  # Get PR details
+  local title
+  local url
+  local base_branch
+  local head_branch
+  
+  title=$($pr_cmd --json title -q '.title' 2>/dev/null) || {
+    if [ -n "$repo" ]; then
+      echo -e "${RED}Error: PR #$pr_number not found in $repo${NC}"
+    else
+      echo -e "${RED}Error: Could not fetch PR #$pr_number${NC}"
+    fi
+    return 1
+  }
+  
+  url=$($pr_cmd --json url -q '.url' 2>/dev/null)
+  base_branch=$($pr_cmd --json baseRefName -q '.baseRefName' 2>/dev/null)
+  head_branch=$($pr_cmd --json headRefName -q '.headRefName' 2>/dev/null)
+  
+  echo -e "${BLUE}PR #$pr_number:${NC} $title"
+  if [ -n "$url" ]; then
+    echo -e "${BLUE}Link:${NC} $url"
+  fi
+  
+  if [ -n "$base_branch" ] && [ -n "$head_branch" ]; then
+    echo -e "${CYAN}Branches:${NC} $head_branch → $base_branch"
+  fi
+  echo ""
+  
+  # Build status check command
+  local status_cmd="gh pr view $pr_number"
+  if [ -n "$repo" ]; then
+    status_cmd="$status_cmd --repo $repo"
+  fi
+  
+  # Get status checks
+  $status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | "\(.context)|\(.state)"' 2>/dev/null | while IFS='|' read -r context state; do
+    print_status "$state"
+    echo " - $context"
+  done
+  
+  # Summary
+  echo ""
+  if ! $status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | select(.state=="PENDING" or .state=="FAILURE")' 2>/dev/null | grep -q .; then
+    echo -e "${GREEN}✅ All checks passed!${NC}"
+  elif $status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | select(.state=="PENDING")' 2>/dev/null | grep -q .; then
+    echo -e "${YELLOW}⏳ Some checks are still pending${NC}"
+  elif $status_cmd --json statusCheckRollup -q '.statusCheckRollup[] | select(.state=="FAILURE")' 2>/dev/null | grep -q .; then
+    echo -e "${RED}❌ Some checks failed${NC}"
+  fi
+  
+  # Display reviews
+  local reviews
+  reviews=$($status_cmd --json reviews -q '.reviews[] | "\(.author.login)|\(.state)"' 2>/dev/null)
+  
+  if [ -n "$reviews" ]; then
+    echo -e "\n${BLUE}Reviews:${NC}"
+    echo "$reviews" | while IFS='|' read -r author state; do
+      echo "  - $author: $state"
+    done
+  fi
+  
+  echo ""
+}
+
+check_all_prs_in_repo() {
+  local repo=$1
+  
+  if [ -n "$repo" ]; then
+    echo -e "${BLUE}Fetching all open PRs in $repo...${NC}\n"
+  else
+    echo -e "${BLUE}Fetching all open PRs for current user in this repo...${NC}\n"
+  fi
+  
+  local prs
+  local pr_cmd="gh pr list --author @me --state open -q '.[].number'"
+  
+  if [ -n "$repo" ]; then
+    pr_cmd="$pr_cmd --repo $repo"
+  fi
+  
+  prs=$($pr_cmd 2>/dev/null) || {
+    echo -e "${RED}Error: Could not fetch PRs${NC}"
+    return 1
+  }
+  
+  if [ -z "$prs" ]; then
+    echo -e "${YELLOW}No open PRs found${NC}"
+    return 0
+  fi
+  
+  while read -r pr_number; do
+    check_single_pr "$pr_number" "$repo"
+  done <<< "$prs"
+}
+
+check_all_prs_all_repos() {
+  echo -e "${BLUE}Fetching all open PRs for current user across all repos...${NC}\n"
+  
+  local prs
+  prs=$(gh search prs --author @me --state open --json number,repository -q '.[] | "\(.number)|\(.repository.nameWithOwner)"' 2>/dev/null) || {
+    echo -e "${YELLOW}No open PRs found or error fetching PRs${NC}"
+    return 0
+  }
+  
+  if [ -z "$prs" ]; then
+    echo -e "${YELLOW}No open PRs found${NC}"
+    return 0
+  fi
+  
+  while IFS='|' read -r pr_number repo; do
+    echo -e "${BLUE}[${repo}]${NC}"
+    check_single_pr "$pr_number" "$repo"
+  done <<< "$prs"
+}
+
+# Check if we're in a git repository
+is_in_git_repo() {
+  git rev-parse --git-dir > /dev/null 2>&1
+  return $?
+}
+
+# Check if argument is a repo (contains /)
+is_repo_format() {
+  [[ "$1" == *"/"* ]]
+}
+
+# Main logic
+case $# in
+  0)
+    # Scenario 0: no args - all PRs across all repos
+    check_all_prs_all_repos
+    ;;
+  1)
+    # Could be: repo OR pr_number
+    if is_repo_format "$1"; then
+      # Scenario 2: REPO specified, no PR
+      check_all_prs_in_repo "$1"
+    else
+      # Could be PR number
+      if is_in_git_repo; then
+        # Scenario 4: CD exists, no REPO, PR specified
+        check_single_pr "$1"
+      else
+        # Scenario 1: no CD, no REPO, but PR - raise error
+        echo -e "${RED}Error: Cannot find PR #$1 without repository context${NC}"
+        echo -e "${YELLOW}Usage:${NC}"
+        echo -e "  ${BLUE}pr-status${NC}                              (all PRs across all repos)"
+        echo -e "  ${BLUE}pr-status <owner/repo>${NC}                 (all PRs in repo)"
+        echo -e "  ${BLUE}pr-status <pr_number>${NC}                  (must be in a git repo)"
+        echo -e "  ${BLUE}pr-status <owner/repo> <pr_number>${NC}     (specific PR in repo)\n"
+        exit 1
+      fi
+    fi
+    ;;
+  2)
+    # Scenario 3/5: REPO and PR specified
+    check_single_pr "$2" "$1"
+    ;;
+  *)
+    echo -e "${RED}Error: Invalid arguments${NC}"
+    echo -e "${YELLOW}Usage:${NC}"
+    echo -e "  ${BLUE}pr-status${NC}                              (all PRs across all repos)"
+    echo -e "  ${BLUE}pr-status <owner/repo>${NC}                 (all PRs in repo)"
+    echo -e "  ${BLUE}pr-status <pr_number>${NC}                  (must be in a git repo)"
+    echo -e "  ${BLUE}pr-status <owner/repo> <pr_number>${NC}     (specific PR in repo)\n"
+    exit 1
+    ;;
+esac
